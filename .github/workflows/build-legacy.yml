@@ -40,7 +40,7 @@ jobs:
           # We build libxml2 2.11 from source below; intl is skipped on macOS.
           brew install autoconf automake bison re2c pkg-config \
             sqlite openssl@1.1 curl zlib libpng libjpeg-turbo \
-            oniguruma libzip libsodium libiconv
+            oniguruma libzip libsodium
 
       - name: Build libxml2 2.11 from source (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -124,14 +124,14 @@ jobs:
             LIBZIP_DIR="$(brew --prefix libzip)"
             SODIUM_DIR="$(brew --prefix libsodium)"
             READLINE_DIR="$(brew --prefix readline)"
-            ICONV_DIR="$(brew --prefix libiconv)"
             export PATH="$(brew --prefix bison)/bin:$PATH"
 
             # DNS resolver functions (res_nsearch etc.) live in libresolv on macOS
+            # Use system iconv (not Homebrew's) so the binary is portable
             export EXTRA_LIBS="-lresolv"
 
             CONFIGURE_FLAGS+=(
-              --with-iconv="$ICONV_DIR"
+              --with-iconv
               --with-openssl="$OPENSSL_DIR"
               --with-sodium="$SODIUM_DIR"
               --with-readline="$READLINE_DIR"
@@ -157,6 +157,23 @@ jobs:
           make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           echo "Build completed"
           ls -la sapi/cli/php sapi/fpm/php-fpm
+
+      - name: Verify no Homebrew dylib leaks (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          echo "=== CLI binary ==="
+          otool -L php-src/sapi/cli/php
+          echo ""
+          echo "=== FPM binary ==="
+          otool -L php-src/sapi/fpm/php-fpm
+          echo ""
+          # Fail if any /opt/homebrew dylib is referenced
+          if otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep -q '/opt/homebrew'; then
+            echo "::error::Binary links to Homebrew dylibs — not portable!"
+            otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep '/opt/homebrew'
+            exit 1
+          fi
+          echo "All dynamic libraries are system-only — binary is portable."
 
       - name: Package CLI binary
         run: |
