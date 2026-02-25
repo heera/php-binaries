@@ -1,0 +1,305 @@
+name: Build Legacy PHP (7.4)
+
+# PHP 7.4.33 is the final release — this only needs to run once.
+# After the first successful run, the php-7.4 release is permanent
+# and the weekly mirror workflow includes it in the manifest.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PHP_VERSION: "7.4.33"
+  PHP_MINOR: "7.4"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build PHP 7.4 from source on native runners
+  # ---------------------------------------------------------------------------
+  build-unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos-aarch64
+          - os: macos-13
+            platform: macos-x86_64
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install build dependencies (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew install autoconf automake bison re2c pkg-config \
+            libxml2 sqlite openssl@3 curl zlib libpng libjpeg-turbo \
+            oniguruma libzip icu4c libsodium
+
+      - name: Install build dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake bison re2c \
+            pkg-config libxml2-dev libsqlite3-dev libssl-dev libcurl4-openssl-dev \
+            zlib1g-dev libpng-dev libjpeg-dev libonig-dev libzip-dev libicu-dev \
+            libsodium-dev libreadline-dev
+
+      - name: Download PHP source
+        run: |
+          curl -fSL "https://www.php.net/distributions/php-${PHP_VERSION}.tar.gz" -o php-src.tar.gz
+          tar xzf php-src.tar.gz
+          mv "php-${PHP_VERSION}" php-src
+
+      - name: Configure and build PHP
+        run: |
+          cd php-src
+
+          # Common configure flags for extensions WordPress needs
+          CONFIGURE_FLAGS=(
+            --disable-debug
+            --disable-phpdbg
+            --enable-bcmath
+            --enable-calendar
+            --enable-exif
+            --enable-fpm
+            --enable-ftp
+            --enable-mbstring
+            --enable-opcache
+            --enable-pcntl
+            --enable-shmop
+            --enable-soap
+            --enable-sockets
+            --enable-sysvmsg
+            --enable-sysvsem
+            --enable-sysvshm
+            --enable-intl
+            --with-curl
+            --with-openssl
+            --with-zlib
+            --with-zip
+            --with-gd
+            --with-jpeg-dir=/usr
+            --with-png-dir=/usr
+            --with-mysqli=mysqlnd
+            --with-pdo-mysql=mysqlnd
+            --with-sodium
+            --with-readline
+          )
+
+          # macOS-specific paths
+          if [[ "${{ matrix.platform }}" == macos-* ]]; then
+            OPENSSL_DIR="$(brew --prefix openssl@3)"
+            ICU_DIR="$(brew --prefix icu4c)"
+            LIBXML2_DIR="$(brew --prefix libxml2)"
+            LIBJPEG_DIR="$(brew --prefix libjpeg-turbo)"
+            LIBPNG_DIR="$(brew --prefix libpng)"
+            LIBZIP_DIR="$(brew --prefix libzip)"
+            SODIUM_DIR="$(brew --prefix libsodium)"
+            READLINE_DIR="$(brew --prefix readline)"
+            BISON="$(brew --prefix bison)/bin/bison"
+            export PATH="$(brew --prefix bison)/bin:$PATH"
+
+            CONFIGURE_FLAGS+=(
+              --with-openssl="$OPENSSL_DIR"
+              --with-libxml-dir="$LIBXML2_DIR"
+              --with-jpeg-dir="$LIBJPEG_DIR"
+              --with-png-dir="$LIBPNG_DIR"
+              --with-sodium="$SODIUM_DIR"
+              --with-readline="$READLINE_DIR"
+            )
+            export PKG_CONFIG_PATH="${OPENSSL_DIR}/lib/pkgconfig:${ICU_DIR}/lib/pkgconfig:${LIBXML2_DIR}/lib/pkgconfig:${LIBZIP_DIR}/lib/pkgconfig:${SODIUM_DIR}/lib/pkgconfig"
+          fi
+
+          ./configure "${CONFIGURE_FLAGS[@]}" 2>&1 | tail -20
+
+          make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" 2>&1 | tail -5
+          echo "Build completed successfully"
+
+      - name: Package CLI binary
+        run: |
+          mkdir -p staging-cli
+          cp php-src/sapi/cli/php staging-cli/php
+          chmod 755 staging-cli/php
+          # Verify it works
+          staging-cli/php -v
+          cd staging-cli
+          tar czf "../php-${PHP_VERSION}-cli-${{ matrix.platform }}.tar.gz" php
+
+      - name: Package FPM binary
+        run: |
+          mkdir -p staging-fpm
+          cp php-src/sapi/fpm/php-fpm staging-fpm/php-fpm
+          chmod 755 staging-fpm/php-fpm
+          staging-fpm/php-fpm -v
+          cd staging-fpm
+          tar czf "../php-${PHP_VERSION}-fpm-${{ matrix.platform }}.tar.gz" php-fpm
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.platform }}
+          path: |
+            php-${{ env.PHP_VERSION }}-cli-${{ matrix.platform }}.tar.gz
+            php-${{ env.PHP_VERSION }}-fpm-${{ matrix.platform }}.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Download Windows build from archives
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows PHP 7.4
+        run: |
+          # PHP 7.4 uses VC15 (vs15)
+          for vs in vc15 vs16; do
+            url="https://windows.php.net/downloads/releases/archives/php-${PHP_VERSION}-nts-Win32-${vs}-x64.zip"
+            echo "Trying ${url}..."
+            if curl -fSL --retry 3 "${url}" -o "php-${PHP_VERSION}-windows-x86_64.zip" 2>/dev/null; then
+              echo "OK"
+              break
+            fi
+          done
+
+          if [ ! -f "php-${PHP_VERSION}-windows-x86_64.zip" ]; then
+            echo "::error::No Windows build found for PHP ${PHP_VERSION}"
+            exit 1
+          fi
+
+          ls -la "php-${PHP_VERSION}-windows-x86_64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-windows
+          path: php-${{ env.PHP_VERSION }}-windows-x86_64.zip
+
+  # ---------------------------------------------------------------------------
+  # Create release with all binaries
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-unix, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: php-*
+          merge-multiple: true
+          path: assets/
+
+      - name: Generate checksums
+        run: |
+          cd assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Build manifest fragment
+        run: |
+          REPO="${{ github.repository }}"
+
+          python3 -c "
+          import json, os, hashlib
+
+          version = '${PHP_VERSION}'
+          minor = '${PHP_MINOR}'
+          tag = 'php-${PHP_MINOR}'
+          repo = '${REPO}'
+          assets_dir = 'assets'
+          result = {}
+
+          for fname in sorted(os.listdir(assets_dir)):
+              if fname == 'SHA256SUMS.txt':
+                  continue
+              fpath = os.path.join(assets_dir, fname)
+              size = os.path.getsize(fpath)
+              sha256 = hashlib.sha256(open(fpath, 'rb').read()).hexdigest()
+
+              name = fname.replace(f'php-{version}-', '').rsplit('.', 2)[0]
+              if name.endswith('.tar'):
+                  name = name[:-4]
+              if name == 'windows-x86_64':
+                  name = 'cli-windows-x86_64'
+
+              url = f'https://github.com/{repo}/releases/download/{tag}/{fname}'
+              result[name] = {'url': url, 'sha256': sha256, 'size': size}
+
+          fragment = {version: {'minor': minor, 'assets': result}}
+
+          os.makedirs('fragments', exist_ok=True)
+          with open(f'fragments/{version}.json', 'w') as f:
+              json.dump(fragment, f, indent=2)
+          print(json.dumps(fragment, indent=2))
+          "
+
+      - name: Upload fragment for manifest workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: fragment-${{ env.PHP_VERSION }}
+          path: fragments/
+
+      - name: Delete existing release (if any)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="php-${PHP_MINOR}"
+          gh release delete "${TAG}" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="php-${PHP_MINOR}"
+          gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "PHP ${PHP_VERSION}" \
+            --notes "PHP ${PHP_VERSION} binaries for all platforms. Built from source (final 7.4 release)." \
+            assets/*
+
+      # Also rebuild the manifest to include this version
+      - name: Fetch existing manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download manifest \
+            --repo "${{ github.repository }}" \
+            --pattern 'manifest.json' \
+            --output existing-manifest.json 2>/dev/null || echo '{"versions":{}}' > existing-manifest.json
+
+      - name: Merge into manifest
+        run: |
+          python3 -c "
+          import json
+          from datetime import datetime, timezone
+
+          with open('existing-manifest.json') as f:
+              manifest = json.load(f)
+
+          with open('fragments/${PHP_VERSION}.json') as f:
+              fragment = json.load(f)
+
+          manifest['versions'].update(fragment)
+          manifest['generated_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          with open('manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+
+          print(json.dumps(manifest, indent=2)[:2000])
+          "
+
+      - name: Update manifest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete manifest --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin :refs/tags/manifest 2>/dev/null || true
+          gh release create manifest \
+            --repo "${{ github.repository }}" \
+            --title "PHP Binaries Manifest" \
+            --notes "Auto-generated manifest of all available PHP binaries with SHA256 checksums." \
+            manifest.json

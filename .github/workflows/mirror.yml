@@ -190,7 +190,7 @@ jobs:
             assets/*
 
   # ---------------------------------------------------------------------------
-  # Job 3: Assemble manifest.json from all fragments
+  # Job 3: Assemble manifest.json from all fragments + legacy releases
   # ---------------------------------------------------------------------------
   publish-manifest:
     needs: mirror
@@ -202,6 +202,94 @@ jobs:
           pattern: fragment-*
           merge-multiple: true
           path: fragments/
+
+      - name: Fetch legacy release fragments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Include any releases built by build-legacy.yml (e.g. php-7.4)
+          # that aren't part of this workflow run's artifacts.
+          REPO="${{ github.repository }}"
+          for tag in $(gh release list --repo "$REPO" --json tagName --jq '.[].tagName'); do
+            # Only process php-X.Y tags
+            if [[ ! "$tag" =~ ^php-[0-9]+\.[0-9]+$ ]]; then
+              continue
+            fi
+            minor="${tag#php-}"
+            # Skip if we already have a fragment for this minor series
+            if ls fragments/*".json" 2>/dev/null | xargs grep -l "\"minor\": \"${minor}\"" >/dev/null 2>&1; then
+              continue
+            fi
+            echo "Fetching legacy fragment for ${tag}..."
+            # Build fragment from release assets
+            python3 -c "
+          import json, subprocess, hashlib
+
+          tag = '${tag}'
+          minor = '${minor}'
+          repo = '${REPO}'
+
+          # List release assets via gh CLI
+          result = subprocess.run(
+              ['gh', 'release', 'view', tag, '--repo', repo, '--json', 'assets'],
+              capture_output=True, text=True
+          )
+          if result.returncode != 0:
+              print(f'  Skipping {tag}: {result.stderr.strip()}')
+              exit(0)
+
+          assets_data = json.loads(result.stdout)['assets']
+          version = None
+          assets = {}
+
+          for asset in assets_data:
+              name = asset['name']
+              if name == 'SHA256SUMS.txt':
+                  continue
+              url = asset['url']
+              size = asset['size']
+
+              # Extract version from filename: php-7.4.33-cli-macos-aarch64.tar.gz
+              if name.startswith('php-') and not version:
+                  parts = name.split('-')
+                  if len(parts) >= 3:
+                      version = parts[1]
+
+              if not version:
+                  continue
+
+              key = name.replace(f'php-{version}-', '').rsplit('.', 2)[0]
+              if key.endswith('.tar'):
+                  key = key[:-4]
+              if key == 'windows-x86_64':
+                  key = 'cli-windows-x86_64'
+
+              dl_url = f'https://github.com/{repo}/releases/download/{tag}/{name}'
+              assets[key] = {'url': dl_url, 'sha256': '', 'size': size}
+
+          if version and assets:
+              # Try to get SHA256 from the release's SHA256SUMS.txt
+              sums_result = subprocess.run(
+                  ['gh', 'release', 'download', tag, '--repo', repo,
+                   '--pattern', 'SHA256SUMS.txt', '--output', '-'],
+                  capture_output=True, text=True
+              )
+              if sums_result.returncode == 0:
+                  for line in sums_result.stdout.strip().split('\n'):
+                      parts = line.split()
+                      if len(parts) == 2:
+                          sha, fname = parts
+                          for akey, aval in assets.items():
+                              if fname in aval['url']:
+                                  aval['sha256'] = sha
+
+              fragment = {version: {'minor': minor, 'assets': assets}}
+              fpath = f'fragments/{version}.json'
+              with open(fpath, 'w') as f:
+                  json.dump(fragment, f, indent=2)
+              print(f'  Added {version} to manifest')
+          "
+          done
 
       - name: Assemble manifest.json
         run: |
