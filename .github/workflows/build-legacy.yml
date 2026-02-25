@@ -110,7 +110,7 @@ jobs:
 
           # --- libsodium ---
           echo "::group::libsodium"
-          curl -fSL "https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-RELEASE.tar.gz" -o libsodium.tar.gz
+          curl -fSL "https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz" -o libsodium.tar.gz
           tar xzf libsodium.tar.gz
           cd libsodium-stable
           ./configure --prefix="$PREFIX" --disable-shared --enable-static
