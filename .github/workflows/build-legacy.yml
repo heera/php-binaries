@@ -128,10 +128,13 @@ jobs:
 
             # DNS resolver functions (res_nsearch etc.) live in libresolv on macOS
             # Use system iconv (not Homebrew's) so the binary is portable
-            export EXTRA_LIBS="-lresolv"
+            SDK_PATH="$(xcrun --show-sdk-path)"
+            export EXTRA_LIBS="-lresolv -liconv"
+            export LDFLAGS="-L${SDK_PATH}/usr/lib"
+            export CPPFLAGS="-I${SDK_PATH}/usr/include"
 
             CONFIGURE_FLAGS+=(
-              --with-iconv=/usr
+              --with-iconv="${SDK_PATH}/usr"
               --with-openssl="$OPENSSL_DIR"
               --with-sodium="$SODIUM_DIR"
               --with-readline="$READLINE_DIR"
