@@ -131,7 +131,7 @@ jobs:
             export EXTRA_LIBS="-lresolv"
 
             CONFIGURE_FLAGS+=(
-              --with-iconv
+              --with-iconv=/usr
               --with-openssl="$OPENSSL_DIR"
               --with-sodium="$SODIUM_DIR"
               --with-readline="$READLINE_DIR"
