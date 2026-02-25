@@ -127,6 +127,9 @@ jobs:
             ICONV_DIR="$(brew --prefix libiconv)"
             export PATH="$(brew --prefix bison)/bin:$PATH"
 
+            # DNS resolver functions (res_nsearch etc.) live in libresolv on macOS
+            export EXTRA_LIBS="-lresolv"
+
             CONFIGURE_FLAGS+=(
               --with-iconv="$ICONV_DIR"
               --with-openssl="$OPENSSL_DIR"
