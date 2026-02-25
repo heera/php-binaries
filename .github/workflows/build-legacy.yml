@@ -58,6 +58,10 @@ jobs:
           set -o pipefail
           cd php-src
 
+          # PHP 7.4 uses deprecated OpenSSL APIs removed in 3.x.
+          # Suppress all warnings to prevent modern compilers from erroring.
+          export CFLAGS="-w"
+
           # PHP 7.4 uses --enable-gd / --with-jpeg (not --with-gd / --with-jpeg-dir)
           CONFIGURE_FLAGS=(
             --disable-debug
