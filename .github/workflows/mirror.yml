@@ -1,0 +1,244 @@
+name: Mirror PHP Binaries
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Discover latest patch version for each minor series
+  # ---------------------------------------------------------------------------
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      - name: Fetch upstream index
+        run: curl -fsSL https://dl.static-php.dev/static-php-cli/bulk/ -o index.html
+
+      - name: Parse latest versions
+        id: parse
+        run: |
+          # Extract all fpm-linux-x86_64 filenames → unique versions
+          grep -oP 'php-\K\d+\.\d+\.\d+(?=-fpm-linux-x86_64\.tar\.gz)' index.html \
+            | sort -V | uniq > all_versions.txt
+
+          if [ ! -s all_versions.txt ]; then
+            echo "::error::No PHP versions found on upstream"
+            exit 1
+          fi
+
+          # Keep only the latest patch per minor (8.1, 8.2, 8.3, 8.4)
+          declare -A latest
+          while IFS= read -r ver; do
+            minor="${ver%.*}"
+            latest["$minor"]="$ver"
+          done < all_versions.txt
+
+          # Build JSON matrix: [{"version":"8.3.30","minor":"8.3"}, ...]
+          json="["
+          first=true
+          for minor in $(echo "${!latest[@]}" | tr ' ' '\n' | sort -V); do
+            ver="${latest[$minor]}"
+            if [ "$first" = true ]; then first=false; else json+=","; fi
+            json+="{\"version\":\"${ver}\",\"minor\":\"${minor}\"}"
+          done
+          json+="]"
+
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+          echo "Discovered versions: ${json}"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Download, checksum, and release each version (matrix)
+  # ---------------------------------------------------------------------------
+  mirror:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Set up variables
+        id: vars
+        run: |
+          echo "version=${{ matrix.version }}" >> "$GITHUB_OUTPUT"
+          echo "minor=${{ matrix.minor }}" >> "$GITHUB_OUTPUT"
+          echo "tag=php-${{ matrix.minor }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download Unix binaries
+        run: |
+          BASE="https://dl.static-php.dev/static-php-cli/bulk"
+          VER="${{ matrix.version }}"
+          mkdir -p assets
+
+          for variant in cli fpm; do
+            for platform in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
+              src="php-${VER}-${variant}-${platform}.tar.gz"
+              dest="assets/php-${VER}-${variant}-${platform}.tar.gz"
+              echo "Downloading ${src}..."
+              if curl -fSL --retry 3 "${BASE}/${src}" -o "${dest}"; then
+                echo "  OK ($(stat -c%s "${dest}") bytes)"
+              else
+                echo "::warning::Failed to download ${src}"
+                rm -f "${dest}"
+              fi
+            done
+          done
+
+      - name: Download Windows binary
+        run: |
+          VER="${{ matrix.version }}"
+          dest="assets/php-${VER}-windows-x86_64.zip"
+
+          # Try vs16 first (PHP 8.1-8.3), then vs17 (PHP 8.4+)
+          for vs in vs16 vs17; do
+            url="https://windows.php.net/downloads/releases/php-${VER}-nts-Win32-${vs}-x64.zip"
+            echo "Trying ${url}..."
+            if curl -fSL --retry 3 "${url}" -o "${dest}" 2>/dev/null; then
+              echo "  OK ($(stat -c%s "${dest}") bytes)"
+              break
+            fi
+            rm -f "${dest}"
+          done
+
+          if [ ! -f "${dest}" ]; then
+            echo "::warning::Windows binary not available for PHP ${VER}"
+          fi
+
+      - name: Generate checksums
+        run: |
+          cd assets
+          for f in *; do
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+
+      - name: Build manifest fragment
+        run: |
+          VER="${{ matrix.version }}"
+          MINOR="${{ matrix.minor }}"
+          TAG="${{ steps.vars.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          python3 -c "
+          import json, os, hashlib
+
+          version = '${VER}'
+          minor = '${MINOR}'
+          tag = '${TAG}'
+          repo = '${REPO}'
+          assets_dir = 'assets'
+          assets = {}
+
+          for fname in sorted(os.listdir(assets_dir)):
+              if fname == 'SHA256SUMS.txt':
+                  continue
+              fpath = os.path.join(assets_dir, fname)
+              size = os.path.getsize(fpath)
+              sha256 = hashlib.sha256(open(fpath, 'rb').read()).hexdigest()
+
+              # Derive asset key from filename:
+              # php-8.3.30-cli-macos-aarch64.tar.gz → cli-macos-aarch64
+              # php-8.3.30-windows-x86_64.zip → cli-windows-x86_64
+              name = fname.replace(f'php-{version}-', '').rsplit('.', 2)[0]
+              if name.endswith('.tar'):
+                  name = name[:-4]
+              if name == f'windows-x86_64':
+                  # Windows has both CLI+FPM, register as cli-windows-x86_64
+                  name = 'cli-windows-x86_64'
+
+              url = f'https://github.com/{repo}/releases/download/{tag}/{fname}'
+              assets[name] = {'url': url, 'sha256': sha256, 'size': size}
+
+          fragment = {version: {'minor': minor, 'assets': assets}}
+
+          os.makedirs('fragments', exist_ok=True)
+          with open(f'fragments/{version}.json', 'w') as f:
+              json.dump(fragment, f, indent=2)
+          print(json.dumps(fragment, indent=2))
+          "
+
+      - name: Upload fragment as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fragment-${{ matrix.version }}
+          path: fragments/
+
+      - name: Delete existing release (if any)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          gh release delete "${TAG}" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          VER="${{ matrix.version }}"
+          gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "PHP ${VER}" \
+            --notes "Static PHP ${VER} binaries for all platforms. Auto-mirrored from upstream." \
+            assets/*
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Assemble manifest.json from all fragments
+  # ---------------------------------------------------------------------------
+  publish-manifest:
+    needs: mirror
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fragment-*
+          merge-multiple: true
+          path: fragments/
+
+      - name: Assemble manifest.json
+        run: |
+          python3 -c "
+          import json, os, glob
+          from datetime import datetime, timezone
+
+          versions = {}
+          for fpath in sorted(glob.glob('fragments/*.json')):
+              with open(fpath) as f:
+                  data = json.load(f)
+                  versions.update(data)
+
+          manifest = {
+              'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'versions': versions
+          }
+
+          with open('manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+
+          print(json.dumps(manifest, indent=2))
+          "
+
+      - name: Delete existing manifest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete manifest --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin :refs/tags/manifest 2>/dev/null || true
+
+      - name: Publish manifest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create manifest \
+            --repo "${{ github.repository }}" \
+            --title "PHP Binaries Manifest" \
+            --notes "Auto-generated manifest of all available PHP binaries with SHA256 checksums." \
+            manifest.json
