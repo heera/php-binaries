@@ -42,13 +42,25 @@ jobs:
             sqlite openssl@1.1 curl zlib libpng libjpeg-turbo \
             oniguruma libzip libsodium
 
+      - name: Force static linking for Homebrew libraries (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          # Remove .dylib files so the linker can only find .a (static) versions.
+          # This ensures the binary is portable and doesn't reference /opt/homebrew paths.
+          for pkg in openssl@1.1 libpng libjpeg-turbo oniguruma libsodium libzip; do
+            prefix="$(brew --prefix "$pkg")"
+            echo "Removing dylibs from $prefix/lib..."
+            rm -f "${prefix}"/lib/*.dylib
+            ls "${prefix}"/lib/*.a 2>/dev/null || echo "  (no .a files found)"
+          done
+
       - name: Build libxml2 2.11 from source (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
           curl -fSL "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.9.tar.xz" -o libxml2.tar.xz
           tar xf libxml2.tar.xz
           cd libxml2-2.11.9
-          ./configure --prefix=/opt/libxml2 --without-python --without-lzma
+          ./configure --prefix=/opt/libxml2 --without-python --without-lzma --disable-shared --enable-static
           make -j"$(sysctl -n hw.ncpu)"
           sudo make install
           echo "libxml2 2.11.9 installed to /opt/libxml2"
