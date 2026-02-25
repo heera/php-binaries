@@ -130,7 +130,7 @@ jobs:
             # Use system iconv (not Homebrew's) so the binary is portable
             SDK_PATH="$(xcrun --show-sdk-path)"
             export EXTRA_LIBS="-lresolv -liconv"
-            export LDFLAGS="-L${SDK_PATH}/usr/lib"
+            export LDFLAGS="-L${SDK_PATH}/usr/lib -L${READLINE_DIR}/lib -L${SODIUM_DIR}/lib -L${OPENSSL_DIR}/lib -L${LIBZIP_DIR}/lib -L${LIBJPEG_DIR}/lib"
             export CPPFLAGS="-I${SDK_PATH}/usr/include"
 
             CONFIGURE_FLAGS+=(
