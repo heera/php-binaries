@@ -14,6 +14,8 @@ env:
   PHP_VERSION: "7.4.33"
   PHP_MINOR: "7.4"
   OPENSSL_VERSION: "1.1.1w"
+  # All non-system macOS deps are built from source into this prefix
+  DEPS_PREFIX: "/opt/php-deps"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -32,38 +34,111 @@ jobs:
             platform: linux-aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Install build dependencies (macOS)
+      - name: Install build tools (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          # Only install libs known to be compatible with PHP 7.4.
-          # Do NOT install libxml2 (2.13+ breaks PHP 7.4) or icu4c (78+ breaks intl).
-          # We build libxml2 2.11 from source below; intl is skipped on macOS.
-          brew install autoconf automake bison re2c pkg-config \
-            sqlite openssl@1.1 curl zlib libpng libjpeg-turbo \
-            oniguruma libzip libsodium
+          brew install autoconf automake bison re2c pkg-config cmake
 
-      - name: Force static linking for Homebrew libraries (macOS)
+      - name: Build static dependencies from source (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          # Remove .dylib files so the linker can only find .a (static) versions.
-          # This ensures the binary is portable and doesn't reference /opt/homebrew paths.
-          for pkg in openssl@1.1 libpng libjpeg-turbo oniguruma libsodium libzip; do
-            prefix="$(brew --prefix "$pkg")"
-            echo "Removing dylibs from $prefix/lib..."
-            rm -f "${prefix}"/lib/*.dylib
-            ls "${prefix}"/lib/*.a 2>/dev/null || echo "  (no .a files found)"
-          done
+          # Build ALL non-system libraries as static-only to produce a portable binary.
+          # macOS provides: libiconv, libresolv, libz, libsqlite3, libcurl, libSystem
+          set -e
+          PREFIX="${DEPS_PREFIX}"
+          sudo mkdir -p "$PREFIX"
+          NCPU="$(sysctl -n hw.ncpu)"
 
-      - name: Build libxml2 2.11 from source (macOS)
-        if: startsWith(matrix.os, 'macos')
-        run: |
+          # --- OpenSSL 1.1 ---
+          echo "::group::OpenSSL 1.1"
+          curl -fSL "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl.tar.gz
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure darwin64-arm64-cc no-shared no-tests --prefix="$PREFIX"
+          make -j"$NCPU"
+          sudo make install_sw
+          cd ..
+          echo "::endgroup::"
+
+          # --- libxml2 2.11 (PHP 7.4 incompatible with 2.13+) ---
+          echo "::group::libxml2 2.11"
           curl -fSL "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.9.tar.xz" -o libxml2.tar.xz
           tar xf libxml2.tar.xz
           cd libxml2-2.11.9
-          ./configure --prefix=/opt/libxml2 --without-python --without-lzma --disable-shared --enable-static
-          make -j"$(sysctl -n hw.ncpu)"
+          ./configure --prefix="$PREFIX" --without-python --without-lzma --disable-shared --enable-static
+          make -j"$NCPU"
           sudo make install
-          echo "libxml2 2.11.9 installed to /opt/libxml2"
+          cd ..
+          echo "::endgroup::"
+
+          # --- libpng ---
+          echo "::group::libpng"
+          curl -fSL "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz" -o libpng.tar.xz
+          tar xf libpng.tar.xz
+          cd libpng-1.6.43
+          ./configure --prefix="$PREFIX" --disable-shared --enable-static
+          make -j"$NCPU"
+          sudo make install
+          cd ..
+          echo "::endgroup::"
+
+          # --- libjpeg-turbo ---
+          echo "::group::libjpeg-turbo"
+          curl -fSL "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.0.3/libjpeg-turbo-3.0.3.tar.gz" -o libjpeg.tar.gz
+          tar xzf libjpeg.tar.gz
+          cd libjpeg-turbo-3.0.3
+          cmake -G"Unix Makefiles" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DENABLE_SHARED=OFF \
+            -DENABLE_STATIC=ON \
+            .
+          make -j"$NCPU"
+          sudo make install
+          cd ..
+          echo "::endgroup::"
+
+          # --- oniguruma ---
+          echo "::group::oniguruma"
+          curl -fSL "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz" -o onig.tar.gz
+          tar xzf onig.tar.gz
+          cd onig-6.9.9
+          ./configure --prefix="$PREFIX" --disable-shared --enable-static
+          make -j"$NCPU"
+          sudo make install
+          cd ..
+          echo "::endgroup::"
+
+          # --- libsodium ---
+          echo "::group::libsodium"
+          curl -fSL "https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-RELEASE.tar.gz" -o libsodium.tar.gz
+          tar xzf libsodium.tar.gz
+          cd libsodium-stable
+          ./configure --prefix="$PREFIX" --disable-shared --enable-static
+          make -j"$NCPU"
+          sudo make install
+          cd ..
+          echo "::endgroup::"
+
+          # --- libzip ---
+          echo "::group::libzip"
+          curl -fSL "https://libzip.org/download/libzip-1.10.1.tar.xz" -o libzip.tar.xz
+          tar xf libzip.tar.xz
+          cd libzip-1.10.1
+          cmake -G"Unix Makefiles" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DENABLE_BZIP2=OFF \
+            -DENABLE_LZMA=OFF \
+            -DENABLE_ZSTD=OFF \
+            -DOPENSSL_ROOT_DIR="$PREFIX" \
+            .
+          make -j"$NCPU"
+          sudo make install
+          cd ..
+          echo "::endgroup::"
+
+          echo "Static dependencies installed to $PREFIX"
+          ls -la "$PREFIX/lib/"*.a
 
       - name: Install build dependencies (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -123,40 +198,35 @@ jobs:
             --with-jpeg
             --with-mysqli=mysqlnd
             --with-pdo-mysql=mysqlnd
-            --with-readline
             --with-sodium
             --with-zip
             --with-zlib
           )
 
           if [[ "${{ matrix.platform }}" == macos-* ]]; then
-            # macOS: use our source-built libxml2 2.11, skip intl (ICU 78+ incompatible)
-            OPENSSL_DIR="$(brew --prefix openssl@1.1)"
-            LIBJPEG_DIR="$(brew --prefix libjpeg-turbo)"
-            LIBZIP_DIR="$(brew --prefix libzip)"
-            SODIUM_DIR="$(brew --prefix libsodium)"
+            # macOS: all deps built from source at DEPS_PREFIX, skip intl (ICU 78+ incompatible)
+            PREFIX="${DEPS_PREFIX}"
+            SDK_PATH="$(xcrun --show-sdk-path)"
             export PATH="$(brew --prefix bison)/bin:$PATH"
 
-            # DNS resolver functions (res_nsearch etc.) live in libresolv on macOS
-            # Use system iconv (not Homebrew's) so the binary is portable
-            # Skip readline on macOS — libedit stub lacks GNU readline symbols,
-            # and Homebrew's readline would create a non-portable dylib reference.
-            SDK_PATH="$(xcrun --show-sdk-path)"
+            # DNS resolver + system iconv
             export EXTRA_LIBS="-lresolv -liconv"
-            export LDFLAGS="-L${SODIUM_DIR}/lib -L${OPENSSL_DIR}/lib -L${LIBZIP_DIR}/lib -L${LIBJPEG_DIR}/lib"
-            export CPPFLAGS="-I${SDK_PATH}/usr/include"
+            export LDFLAGS="-L${PREFIX}/lib"
+            export CPPFLAGS="-I${PREFIX}/include -I${SDK_PATH}/usr/include"
+            export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig"
 
             CONFIGURE_FLAGS+=(
               --with-iconv="${SDK_PATH}/usr"
-              --with-openssl="$OPENSSL_DIR"
-              --with-sodium="$SODIUM_DIR"
+              --with-openssl="$PREFIX"
+              --with-sodium="$PREFIX"
               --without-readline
-              --with-libxml-dir=/opt/libxml2
+              --with-libxml-dir="$PREFIX"
+              --with-jpeg="$PREFIX"
+              --with-png-dir="$PREFIX"
             )
-            export PKG_CONFIG_PATH="/opt/libxml2/lib/pkgconfig:${OPENSSL_DIR}/lib/pkgconfig:${LIBZIP_DIR}/lib/pkgconfig:${SODIUM_DIR}/lib/pkgconfig:${LIBJPEG_DIR}/lib/pkgconfig"
           else
             # Linux: enable intl (system ICU is compatible)
-            CONFIGURE_FLAGS+=(--enable-intl)
+            CONFIGURE_FLAGS+=(--enable-intl --with-readline)
             # Linux: use locally-built OpenSSL 1.1
             CONFIGURE_FLAGS+=(
               --with-openssl=/opt/openssl-1.1
@@ -183,10 +253,10 @@ jobs:
           echo "=== FPM binary ==="
           otool -L php-src/sapi/fpm/php-fpm
           echo ""
-          # Fail if any /opt/homebrew dylib is referenced
-          if otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep -q '/opt/homebrew'; then
-            echo "::error::Binary links to Homebrew dylibs — not portable!"
-            otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep '/opt/homebrew'
+          # Fail if any /opt/homebrew or /opt/php-deps dylib is referenced
+          if otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep -q '/opt/'; then
+            echo "::error::Binary links to non-system dylibs — not portable!"
+            otool -L php-src/sapi/cli/php php-src/sapi/fpm/php-fpm | grep '/opt/'
             exit 1
           fi
           echo "All dynamic libraries are system-only — binary is portable."
