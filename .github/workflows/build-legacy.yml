@@ -123,21 +123,22 @@ jobs:
             LIBJPEG_DIR="$(brew --prefix libjpeg-turbo)"
             LIBZIP_DIR="$(brew --prefix libzip)"
             SODIUM_DIR="$(brew --prefix libsodium)"
-            READLINE_DIR="$(brew --prefix readline)"
             export PATH="$(brew --prefix bison)/bin:$PATH"
 
             # DNS resolver functions (res_nsearch etc.) live in libresolv on macOS
             # Use system iconv (not Homebrew's) so the binary is portable
+            # Skip readline on macOS — libedit stub lacks GNU readline symbols,
+            # and Homebrew's readline would create a non-portable dylib reference.
             SDK_PATH="$(xcrun --show-sdk-path)"
             export EXTRA_LIBS="-lresolv -liconv"
-            export LDFLAGS="-L${SDK_PATH}/usr/lib -L${READLINE_DIR}/lib -L${SODIUM_DIR}/lib -L${OPENSSL_DIR}/lib -L${LIBZIP_DIR}/lib -L${LIBJPEG_DIR}/lib"
+            export LDFLAGS="-L${SODIUM_DIR}/lib -L${OPENSSL_DIR}/lib -L${LIBZIP_DIR}/lib -L${LIBJPEG_DIR}/lib"
             export CPPFLAGS="-I${SDK_PATH}/usr/include"
 
             CONFIGURE_FLAGS+=(
               --with-iconv="${SDK_PATH}/usr"
               --with-openssl="$OPENSSL_DIR"
               --with-sodium="$SODIUM_DIR"
-              --with-readline="$READLINE_DIR"
+              --without-readline
               --with-libxml-dir=/opt/libxml2
             )
             export PKG_CONFIG_PATH="/opt/libxml2/lib/pkgconfig:${OPENSSL_DIR}/lib/pkgconfig:${LIBZIP_DIR}/lib/pkgconfig:${SODIUM_DIR}/lib/pkgconfig:${LIBJPEG_DIR}/lib/pkgconfig"
