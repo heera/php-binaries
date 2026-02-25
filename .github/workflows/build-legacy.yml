@@ -35,11 +35,23 @@ jobs:
       - name: Install build dependencies (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          # Do NOT install libxml2 from Homebrew — 2.13+ breaks PHP 7.4 source compat.
-          # macOS SDK ships a compatible older version.
+          # Only install libs known to be compatible with PHP 7.4.
+          # Do NOT install libxml2 (2.13+ breaks PHP 7.4) or icu4c (78+ breaks intl).
+          # We build libxml2 2.11 from source below; intl is skipped on macOS.
           brew install autoconf automake bison re2c pkg-config \
             sqlite openssl@1.1 curl zlib libpng libjpeg-turbo \
-            oniguruma libzip icu4c libsodium libiconv
+            oniguruma libzip libsodium libiconv
+
+      - name: Build libxml2 2.11 from source (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          curl -fSL "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.9.tar.xz" -o libxml2.tar.xz
+          tar xf libxml2.tar.xz
+          cd libxml2-2.11.9
+          ./configure --prefix=/opt/libxml2 --without-python --without-lzma
+          make -j"$(sysctl -n hw.ncpu)"
+          sudo make install
+          echo "libxml2 2.11.9 installed to /opt/libxml2"
 
       - name: Install build dependencies (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -86,7 +98,6 @@ jobs:
             --enable-fpm
             --enable-ftp
             --enable-gd
-            --enable-intl
             --enable-mbstring
             --enable-opcache
             --enable-pcntl
@@ -107,8 +118,8 @@ jobs:
           )
 
           if [[ "${{ matrix.platform }}" == macos-* ]]; then
+            # macOS: use our source-built libxml2 2.11, skip intl (ICU 78+ incompatible)
             OPENSSL_DIR="$(brew --prefix openssl@1.1)"
-            ICU_DIR="$(brew --prefix icu4c)"
             LIBJPEG_DIR="$(brew --prefix libjpeg-turbo)"
             LIBZIP_DIR="$(brew --prefix libzip)"
             SODIUM_DIR="$(brew --prefix libsodium)"
@@ -121,10 +132,12 @@ jobs:
               --with-openssl="$OPENSSL_DIR"
               --with-sodium="$SODIUM_DIR"
               --with-readline="$READLINE_DIR"
+              --with-libxml-dir=/opt/libxml2
             )
-            # Use system libxml2 (macOS SDK) — Homebrew's 2.13+ is incompatible with PHP 7.4
-            export PKG_CONFIG_PATH="${OPENSSL_DIR}/lib/pkgconfig:${ICU_DIR}/lib/pkgconfig:${LIBZIP_DIR}/lib/pkgconfig:${SODIUM_DIR}/lib/pkgconfig:${LIBJPEG_DIR}/lib/pkgconfig"
+            export PKG_CONFIG_PATH="/opt/libxml2/lib/pkgconfig:${OPENSSL_DIR}/lib/pkgconfig:${LIBZIP_DIR}/lib/pkgconfig:${SODIUM_DIR}/lib/pkgconfig:${LIBJPEG_DIR}/lib/pkgconfig"
           else
+            # Linux: enable intl (system ICU is compatible)
+            CONFIGURE_FLAGS+=(--enable-intl)
             # Linux: use locally-built OpenSSL 1.1
             CONFIGURE_FLAGS+=(
               --with-openssl=/opt/openssl-1.1
