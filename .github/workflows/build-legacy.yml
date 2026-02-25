@@ -70,8 +70,10 @@ jobs:
         run: |
           cd php-src
 
-          # Suppress deprecation warnings from older APIs
-          export CFLAGS="-w"
+          # PHP 7.4 uses APIs removed/changed in newer OpenSSL/libxml2.
+          # Modern Clang (16+) treats incompatible function pointers as errors.
+          # Suppress all warnings and demote remaining errors to warnings.
+          export CFLAGS="-w -Wno-error -Wno-incompatible-function-pointer-types -Wno-int-conversion"
 
           CONFIGURE_FLAGS=(
             --disable-debug
